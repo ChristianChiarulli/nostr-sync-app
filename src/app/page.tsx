@@ -48,6 +48,7 @@ export default function Home() {
   const {
     sync,
     disconnect,
+    refresh,
     connectionState,
     documents,
     createDocument,
@@ -159,6 +160,11 @@ export default function Home() {
   const handleCancelSecretKey = () => {
     setEditingSecretKey(false);
     setSecretKeyInput("");
+  };
+
+  const handleRefresh = () => {
+    refresh();
+    toast.success("Refreshing documents...");
   };
 
   if (!isHydrated) {
@@ -324,10 +330,16 @@ export default function Home() {
         {/* Documents List */}
         {connectionState === "connected" && (
           <div className="space-y-4">
-            <h2 className="text-xl font-semibold flex items-center gap-2">
-              <GitBranch className="h-5 w-5" />
-              Documents ({documents.length})
-            </h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold flex items-center gap-2">
+                <GitBranch className="h-5 w-5" />
+                Documents ({documents.length})
+              </h2>
+              <Button variant="outline" size="sm" onClick={handleRefresh}>
+                <RefreshCw className="h-4 w-4" />
+                Refresh
+              </Button>
+            </div>
 
             {documents.length === 0 ? (
               <Card>
