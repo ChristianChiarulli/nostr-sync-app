@@ -32,34 +32,6 @@ export function useNipDb() {
     () => EMPTY_DOCS
   );
 
-  // Subscribe to documents for the current public key
-  const subscribeToDocuments = useCallback(() => {
-    if (!publicKey) {
-      console.error("No public key available");
-      return;
-    }
-
-    // Clear previous subscription
-    if (subscriptionRef.current) {
-      subscriptionRef.current();
-    }
-
-    // Clear local store when re-subscribing (will be repopulated from relay)
-    store.clear();
-
-    // Subscribe to all syncable events from our pubkey
-    subscriptionRef.current = subscribe(
-      "nip-db-sync",
-      [{ kinds: [DOC_KIND], authors: [publicKey] }],
-      (event: Event) => {
-        store.addRevision(event);
-      },
-      () => {
-        console.log("Initial sync complete");
-      }
-    );
-  }, [publicKey, subscribe, store]);
-
   // Connect and subscribe to documents
   const sync = useCallback(() => {
     if (!publicKey) {
@@ -73,22 +45,29 @@ export function useNipDb() {
     const checkConnection = setInterval(() => {
       if (connectionState === "connected") {
         clearInterval(checkConnection);
-        subscribeToDocuments();
+
+        // Clear previous subscription
+        if (subscriptionRef.current) {
+          subscriptionRef.current();
+        }
+
+        // Subscribe to all syncable events from our pubkey
+        subscriptionRef.current = subscribe(
+          "nip-db-sync",
+          [{ kinds: [DOC_KIND], authors: [publicKey] }],
+          (event: Event) => {
+            store.addRevision(event);
+          },
+          () => {
+            console.log("Initial sync complete");
+          }
+        );
       }
     }, 100);
 
     // Timeout after 5 seconds
     setTimeout(() => clearInterval(checkConnection), 5000);
-  }, [publicKey, connect, connectionState, subscribeToDocuments]);
-
-  // Refresh documents from relay
-  const refresh = useCallback(() => {
-    if (connectionState !== "connected") {
-      console.error("Not connected to relay");
-      return;
-    }
-    subscribeToDocuments();
-  }, [connectionState, subscribeToDocuments]);
+  }, [publicKey, connect, subscribe, connectionState, store]);
 
   // Create a new document
   const createDocument = useCallback(
@@ -238,7 +217,6 @@ export function useNipDb() {
     // Connection
     sync,
     disconnect,
-    refresh,
     connectionState,
 
     // Documents
