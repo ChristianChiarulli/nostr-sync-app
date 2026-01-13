@@ -32,35 +32,41 @@ export function useNipDb() {
     () => EMPTY_DOCS
   );
 
-  // Subscribe to documents for the current public key
-  const subscribeToDocuments = useCallback(() => {
+  // Fetch documents for the current public key (one-time pull, not continuous subscription)
+  const fetchDocuments = useCallback(() => {
     if (!publicKey) {
       console.error("No public key available");
       return;
     }
 
-    // Clear previous subscription
+    // Clear previous subscription if any
     if (subscriptionRef.current) {
       subscriptionRef.current();
+      subscriptionRef.current = null;
     }
 
-    // Clear local store when re-subscribing (will be repopulated from relay)
+    // Clear local store (will be repopulated from relay)
     store.clear();
 
-    // Subscribe to all syncable events from our pubkey
-    subscriptionRef.current = subscribe(
+    // Subscribe to fetch all syncable events from our pubkey
+    const unsubscribe = subscribe(
       "nip-db-sync",
       [{ kinds: [DOC_KIND], authors: [publicKey] }],
       (event: Event) => {
         store.addRevision(event);
       },
       () => {
-        console.log("Initial sync complete");
+        // On EOSE (end of stored events), close the subscription
+        // This makes it a one-time pull instead of continuous listening
+        console.log("Sync complete, closing subscription");
+        unsubscribe();
       }
     );
+
+    subscriptionRef.current = unsubscribe;
   }, [publicKey, subscribe, store]);
 
-  // Connect and subscribe to documents
+  // Connect and fetch documents
   const sync = useCallback(() => {
     if (!publicKey) {
       console.error("No public key available");
@@ -73,22 +79,22 @@ export function useNipDb() {
     const checkConnection = setInterval(() => {
       if (connectionState === "connected") {
         clearInterval(checkConnection);
-        subscribeToDocuments();
+        fetchDocuments();
       }
     }, 100);
 
     // Timeout after 5 seconds
     setTimeout(() => clearInterval(checkConnection), 5000);
-  }, [publicKey, connect, connectionState, subscribeToDocuments]);
+  }, [publicKey, connect, connectionState, fetchDocuments]);
 
-  // Refresh documents from relay
+  // Refresh documents from relay (one-time pull)
   const refresh = useCallback(() => {
     if (connectionState !== "connected") {
       console.error("Not connected to relay");
       return;
     }
-    subscribeToDocuments();
-  }, [connectionState, subscribeToDocuments]);
+    fetchDocuments();
+  }, [connectionState, fetchDocuments]);
 
   // Create a new document
   const createDocument = useCallback(
