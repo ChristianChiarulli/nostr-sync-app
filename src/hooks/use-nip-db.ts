@@ -66,6 +66,9 @@ export function useNipDb() {
     subscriptionRef.current = unsubscribe;
   }, [publicKey, subscribe, store]);
 
+  // Track if we should fetch after connecting
+  const shouldFetchOnConnect = useRef(false);
+
   // Connect and fetch documents
   const sync = useCallback(() => {
     if (!publicKey) {
@@ -73,19 +76,17 @@ export function useNipDb() {
       return;
     }
 
+    shouldFetchOnConnect.current = true;
     connect();
+  }, [publicKey, connect]);
 
-    // Wait for connection
-    const checkConnection = setInterval(() => {
-      if (connectionState === "connected") {
-        clearInterval(checkConnection);
-        fetchDocuments();
-      }
-    }, 100);
-
-    // Timeout after 5 seconds
-    setTimeout(() => clearInterval(checkConnection), 5000);
-  }, [publicKey, connect, connectionState, fetchDocuments]);
+  // Fetch documents when connection state changes to connected
+  useEffect(() => {
+    if (connectionState === "connected" && shouldFetchOnConnect.current) {
+      shouldFetchOnConnect.current = false;
+      fetchDocuments();
+    }
+  }, [connectionState, fetchDocuments]);
 
   // Refresh documents from relay (one-time pull)
   const refresh = useCallback(() => {
