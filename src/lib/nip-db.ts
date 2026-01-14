@@ -172,7 +172,6 @@ export class DocumentStore {
 
   // Add a revision from a Nostr event
   // Stores all revisions for history, uses selectWinningRevision for current state
-  // Returns: { accepted: true } or { accepted: false, reason: string }
   addRevision(event: Event): { accepted: boolean; reason?: string } {
     const revision = eventToRevision(event);
     if (!revision) return { accepted: false, reason: "Invalid event format" };
@@ -187,69 +186,16 @@ export class DocumentStore {
 
     const docRevisions = this.revisions.get(dTag)!;
 
-    // Check if we already have this revision
+    // Check if we already have this revision (by event ID)
     if (docRevisions.some((r) => r.eventId === event.id)) {
       return { accepted: true }; // Already have it, not an error
     }
 
-    // Build set of revision IDs that are referenced as parents (v tags)
-    const referencedRevisions = new Set<string>();
-    for (const existing of docRevisions) {
-      for (const parentId of existing.prevRevisionIds) {
-        referencedRevisions.add(parentId);
-      }
-    }
-    // Also add parents from the new revision
-    for (const parentId of revision.prevRevisionIds) {
-      referencedRevisions.add(parentId);
-    }
+    // Store all revisions - clients keep everything for conflict detection
+    docRevisions.push(revision);
 
-    // Check if this is a conflicting revision (same generation)
-    const newParsed = parseRevisionId(revision.revisionId);
-
-    for (const existing of docRevisions) {
-      const existingParsed = parseRevisionId(existing.revisionId);
-
-      // Same generation - check for conflict
-      if (existingParsed.generation === newParsed.generation) {
-        // If existing revision is referenced as a parent, keep it and reject new
-        if (referencedRevisions.has(existing.revisionId)) {
-          return {
-            accepted: false,
-            reason: `Document "${dTag}" already has a revision at generation ${newParsed.generation} that is part of the revision chain`,
-          };
-        }
-
-        // Higher hash wins
-        if (existingParsed.hash > newParsed.hash) {
-          return {
-            accepted: false,
-            reason: `Document "${dTag}" already has a winning revision at generation ${newParsed.generation}`,
-          };
-        }
-      }
-    }
-
-    // Remove any revisions at same generation that this one dominates
-    // (but keep revisions that are referenced as parents)
-    const filtered = docRevisions.filter((existing) => {
-      const existingParsed = parseRevisionId(existing.revisionId);
-      if (existingParsed.generation === newParsed.generation) {
-        // Keep if referenced as parent
-        if (referencedRevisions.has(existing.revisionId)) {
-          return true;
-        }
-        // Otherwise, only keep if it has higher hash
-        return existingParsed.hash > newParsed.hash;
-      }
-      return true;
-    });
-
-    filtered.push(revision);
-    this.revisions.set(dTag, filtered);
-
-    // Rebuild document with winning revision
-    const doc = buildDocument(dTag, filtered);
+    // Rebuild document with winning revision (deterministic selection)
+    const doc = buildDocument(dTag, docRevisions);
     if (doc) {
       this.documents.set(dTag, doc);
     }
