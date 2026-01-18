@@ -163,6 +163,37 @@ export function createDocumentTags(
   return tags;
 }
 
+// Purge kind constant
+export const PURGE_KIND = 49999;
+
+// Create tags for a purge event
+export function createPurgeTags(docId: string, targetKind: number): string[][] {
+  return [
+    ["d", docId],
+    ["k", targetKind.toString()],
+  ];
+}
+
+// Check if an event is a purge event
+export function isPurgeEvent(event: Event): boolean {
+  return event.kind === PURGE_KIND;
+}
+
+// Get purge target info from a purge event
+export function getPurgeTarget(event: Event): { docId: string; kind: number } | null {
+  if (event.kind !== PURGE_KIND) return null;
+
+  const dTag = event.tags.find((t) => t[0] === "d")?.[1];
+  const kTag = event.tags.find((t) => t[0] === "k")?.[1];
+
+  if (!dTag || !kTag) return null;
+
+  const kind = parseInt(kTag, 10);
+  if (isNaN(kind)) return null;
+
+  return { docId: dTag, kind };
+}
+
 // Document store class for managing local documents
 export class DocumentStore {
   private documents: Map<string, Document> = new Map();
@@ -235,6 +266,13 @@ export class DocumentStore {
   clear(): void {
     this.documents.clear();
     this.revisions.clear();
+    this.notifyListeners();
+  }
+
+  // Purge a document (remove all data for it)
+  purgeDocument(docId: string): void {
+    this.documents.delete(docId);
+    this.revisions.delete(docId);
     this.notifyListeners();
   }
 }

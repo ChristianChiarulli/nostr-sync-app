@@ -8,7 +8,11 @@ import {
   getDocumentStore,
   createRevisionId,
   createDocumentTags,
+  createPurgeTags,
   parseRevisionId,
+  isPurgeEvent,
+  getPurgeTarget,
+  PURGE_KIND,
   type Document,
 } from "@/lib/nip-db";
 
@@ -19,11 +23,11 @@ const DOC_KIND = 40001;
 const EMPTY_DOCS: Document[] = [];
 
 export function useNipDb() {
-  const { connect, disconnect, subscribe, publish, connectionState } =
+  const { connect, disconnect, publish, fetchChanges, connectionState } =
     useNostrRelay();
   const { publicKey } = useNostrStore();
   const store = getDocumentStore();
-  const subscriptionRef = useRef<(() => void) | null>(null);
+  const lastSeqRef = useRef<number>(0);
 
   // Subscribe to store updates
   const documents = useSyncExternalStore(
@@ -32,39 +36,87 @@ export function useNipDb() {
     () => EMPTY_DOCS
   );
 
-  // Fetch documents for the current public key (one-time pull, not continuous subscription)
-  const fetchDocuments = useCallback(() => {
+  // Fetch all documents using changes feed (initial sync)
+  const fetchAllDocuments = useCallback(async () => {
     if (!publicKey) {
       console.error("No public key available");
       return;
     }
 
-    // Clear previous subscription if any
-    if (subscriptionRef.current) {
-      subscriptionRef.current();
-      subscriptionRef.current = null;
+    // Clear local store for full sync
+    store.clear();
+    lastSeqRef.current = 0;
+
+    try {
+      // Fetch all changes from the beginning (including purge events)
+      const result = await fetchChanges({
+        since: 0,
+        kinds: [DOC_KIND, PURGE_KIND],
+        authors: [publicKey],
+      });
+
+      console.log(`Fetched ${result.changes.length} changes, lastSeq: ${result.lastSeq}`);
+
+      // Add all events to the store
+      for (const change of result.changes) {
+        // Handle purge events
+        if (isPurgeEvent(change.event)) {
+          const target = getPurgeTarget(change.event);
+          if (target) {
+            store.purgeDocument(target.docId);
+            console.log(`Purged document: ${target.docId}`);
+          }
+        } else {
+          store.addRevision(change.event);
+        }
+      }
+
+      // Save the last sequence for incremental sync
+      lastSeqRef.current = result.lastSeq;
+    } catch (e) {
+      console.error("Failed to fetch documents:", e);
+    }
+  }, [publicKey, fetchChanges, store]);
+
+  // Fetch only new changes since last sync (incremental sync)
+  const fetchNewChanges = useCallback(async () => {
+    if (!publicKey) {
+      console.error("No public key available");
+      return;
     }
 
-    // Clear local store (will be repopulated from relay)
-    store.clear();
+    try {
+      // Fetch new changes (including purge events)
+      const result = await fetchChanges({
+        since: lastSeqRef.current,
+        kinds: [DOC_KIND, PURGE_KIND],
+        authors: [publicKey],
+      });
 
-    // Subscribe to fetch all syncable events from our pubkey
-    const unsubscribe = subscribe(
-      "nip-db-sync",
-      [{ kinds: [DOC_KIND], authors: [publicKey] }],
-      (event: Event) => {
-        store.addRevision(event);
-      },
-      () => {
-        // On EOSE (end of stored events), close the subscription
-        // This makes it a one-time pull instead of continuous listening
-        console.log("Sync complete, closing subscription");
-        unsubscribe();
+      if (result.changes.length > 0) {
+        console.log(`Fetched ${result.changes.length} new changes, lastSeq: ${result.lastSeq}`);
+
+        for (const change of result.changes) {
+          // Handle purge events
+          if (isPurgeEvent(change.event)) {
+            const target = getPurgeTarget(change.event);
+            if (target) {
+              store.purgeDocument(target.docId);
+              console.log(`Purged document: ${target.docId}`);
+            }
+          } else {
+            store.addRevision(change.event);
+          }
+        }
+
+        lastSeqRef.current = result.lastSeq;
+      } else {
+        console.log("No new changes");
       }
-    );
-
-    subscriptionRef.current = unsubscribe;
-  }, [publicKey, subscribe, store]);
+    } catch (e) {
+      console.error("Failed to fetch changes:", e);
+    }
+  }, [publicKey, fetchChanges, store]);
 
   // Track if we should fetch after connecting
   const shouldFetchOnConnect = useRef(false);
@@ -84,18 +136,27 @@ export function useNipDb() {
   useEffect(() => {
     if (connectionState === "connected" && shouldFetchOnConnect.current) {
       shouldFetchOnConnect.current = false;
-      fetchDocuments();
+      fetchAllDocuments();
     }
-  }, [connectionState, fetchDocuments]);
+  }, [connectionState, fetchAllDocuments]);
 
-  // Refresh documents from relay (one-time pull)
+  // Refresh documents from relay (incremental sync using changes feed)
   const refresh = useCallback(() => {
     if (connectionState !== "connected") {
       console.error("Not connected to relay");
       return;
     }
-    fetchDocuments();
-  }, [connectionState, fetchDocuments]);
+    fetchNewChanges();
+  }, [connectionState, fetchNewChanges]);
+
+  // Full refresh (re-fetch everything)
+  const fullRefresh = useCallback(() => {
+    if (connectionState !== "connected") {
+      console.error("Not connected to relay");
+      return;
+    }
+    fetchAllDocuments();
+  }, [connectionState, fetchAllDocuments]);
 
   // Create a new document
   const createDocument = useCallback(
@@ -215,6 +276,32 @@ export function useNipDb() {
     [publicKey, publish, store]
   );
 
+  // Purge a document (permanently delete all revisions)
+  const purgeDocument = useCallback(
+    async (docId: string): Promise<void> => {
+      if (!publicKey) {
+        throw new Error("No public key available");
+      }
+
+      const tags = createPurgeTags(docId, DOC_KIND);
+
+      try {
+        await publish({
+          kind: PURGE_KIND,
+          content: "",
+          tags,
+        });
+
+        // Remove from local store immediately
+        store.purgeDocument(docId);
+      } catch (e) {
+        console.error("Failed to purge document:", e);
+        throw e;
+      }
+    },
+    [publicKey, publish, store]
+  );
+
   // Get document by ID
   const getDocument = useCallback(
     (docId: string): Document | null => {
@@ -234,26 +321,43 @@ export function useNipDb() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (subscriptionRef.current) {
-        subscriptionRef.current();
-      }
       disconnect();
     };
   }, [disconnect]);
+
+  // Raw changes feed query (for debugging/visualization)
+  const queryChanges = useCallback(
+    async (since: number = 0) => {
+      if (connectionState !== "connected") {
+        throw new Error("Not connected to relay");
+      }
+      if (!publicKey) {
+        throw new Error("No public key available");
+      }
+      return fetchChanges({ since, kinds: [DOC_KIND, PURGE_KIND], authors: [publicKey] });
+    },
+    [connectionState, fetchChanges, publicKey]
+  );
 
   return {
     // Connection
     sync,
     disconnect,
     refresh,
+    fullRefresh,
     connectionState,
+    lastSeq: lastSeqRef.current,
 
     // Documents
     documents,
     createDocument,
     updateDocument,
     deleteDocument,
+    purgeDocument,
     getDocument,
     getRevisions,
+
+    // Changes feed
+    queryChanges,
   };
 }

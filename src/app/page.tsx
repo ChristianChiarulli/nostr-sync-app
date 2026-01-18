@@ -33,7 +33,11 @@ import {
   CheckCircle,
   ChevronDown,
   History,
+  Activity,
+  Play,
+  Flame,
 } from "lucide-react";
+import type { ChangesResult } from "@/hooks/use-nostr-relay";
 
 export default function Home() {
   const {
@@ -54,7 +58,10 @@ export default function Home() {
     createDocument,
     updateDocument,
     deleteDocument,
+    purgeDocument,
     getRevisions,
+    queryChanges,
+    lastSeq,
   } = useNipDb();
 
   // Form state
@@ -65,6 +72,11 @@ export default function Home() {
   const [customRelayUrl, setCustomRelayUrl] = useState(relayUrl);
   const [editingSecretKey, setEditingSecretKey] = useState(false);
   const [secretKeyInput, setSecretKeyInput] = useState("");
+
+  // Changes feed state
+  const [changesResult, setChangesResult] = useState<ChangesResult | null>(null);
+  const [changesSince, setChangesSince] = useState("0");
+  const [changesLoading, setChangesLoading] = useState(false);
 
   // Track hydration
   const [isHydrated, setIsHydrated] = useState(false);
@@ -135,6 +147,18 @@ export default function Home() {
     }
   };
 
+  const handlePurgeDocument = async (docId: string) => {
+    if (!confirm(`Are you sure you want to PURGE "${docId}"?\n\nThis will permanently delete the document and ALL its revision history. This cannot be undone.`)) {
+      return;
+    }
+    try {
+      await purgeDocument(docId);
+      toast.success("Document purged!");
+    } catch (e) {
+      toast.error(`Failed to purge document: ${e}`);
+    }
+  };
+
   const startEditing = (docId: string, content: string) => {
     setEditingDocId(docId);
     setEditContent(content);
@@ -165,6 +189,18 @@ export default function Home() {
   const handleRefresh = () => {
     refresh();
     toast.success("Refreshing documents...");
+  };
+
+  const handleQueryChanges = async () => {
+    setChangesLoading(true);
+    try {
+      const result = await queryChanges(parseInt(changesSince) || 0);
+      setChangesResult(result);
+    } catch (e) {
+      toast.error(`Failed to query changes: ${e}`);
+    } finally {
+      setChangesLoading(false);
+    }
   };
 
   if (!isHydrated) {
@@ -379,6 +415,14 @@ export default function Home() {
                               >
                                 <Trash2 className="h-4 w-4" />
                               </Button>
+                              <Button
+                                variant="destructive"
+                                size="icon-sm"
+                                onClick={() => handlePurgeDocument(doc.id)}
+                                title="Purge document (permanently delete all history)"
+                              >
+                                <Flame className="h-4 w-4" />
+                              </Button>
                             </>
                           )}
                         </div>
@@ -481,6 +525,110 @@ export default function Home() {
               })
             )}
           </div>
+        )}
+
+        {/* Changes Feed */}
+        {connectionState === "connected" && (
+          <Card className="mt-6">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Activity className="h-5 w-5" />
+                Changes Feed
+              </CardTitle>
+              <CardDescription>
+                Query raw changes from the relay (CouchDB-style _changes)
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <label className="text-sm font-medium">Since Sequence</label>
+                  <Input
+                    type="number"
+                    value={changesSince}
+                    onChange={(e) => setChangesSince(e.target.value)}
+                    placeholder="0"
+                    className="mt-1"
+                  />
+                </div>
+                <div className="pt-6">
+                  <Button onClick={handleQueryChanges} disabled={changesLoading}>
+                    {changesLoading ? (
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Play className="h-4 w-4" />
+                    )}
+                    Query
+                  </Button>
+                </div>
+              </div>
+
+              {changesResult && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">
+                      {changesResult.changes.length} change(s) returned
+                    </span>
+                    <Badge variant="outline" className="font-mono">
+                      lastSeq: {changesResult.lastSeq}
+                    </Badge>
+                  </div>
+
+                  <div className="max-h-96 overflow-auto space-y-2">
+                    {changesResult.changes.length === 0 ? (
+                      <div className="text-center py-4 text-muted-foreground text-sm">
+                        No changes since seq {changesSince}
+                      </div>
+                    ) : (
+                      changesResult.changes.map((change) => (
+                        <div
+                          key={change.event.id}
+                          className="p-3 bg-muted rounded text-xs space-y-1"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Badge className="font-mono">seq: {change.seq}</Badge>
+                            <Badge variant="outline">kind: {change.event.kind}</Badge>
+                          </div>
+                          <div className="font-mono text-muted-foreground truncate">
+                            id: {change.event.id}
+                          </div>
+                          <div className="font-mono text-muted-foreground truncate">
+                            pubkey: {change.event.pubkey.slice(0, 16)}...
+                          </div>
+                          <div className="text-muted-foreground">
+                            {new Date(change.event.created_at * 1000).toLocaleString()}
+                          </div>
+                          <div className="space-y-0.5">
+                            {change.event.tags.map((tag, i) => (
+                              <div key={i} className="font-mono text-[10px] text-muted-foreground">
+                                [{tag.map((t) => `"${t}"`).join(", ")}]
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-1 p-2 bg-background rounded text-foreground">
+                            {change.event.content || <em className="text-muted-foreground">(empty)</em>}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => setChangesSince(changesResult.lastSeq.toString())}
+                  >
+                    Set "since" to {changesResult.lastSeq} (continue from here)
+                  </Button>
+                </div>
+              )}
+
+              <div className="text-xs text-muted-foreground">
+                Current sync checkpoint: <code className="bg-muted px-1 rounded">{lastSeq}</code>
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {/* Not connected message */}
